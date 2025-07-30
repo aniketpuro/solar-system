@@ -17,7 +17,7 @@ pipeline {
     options {
         disableResume()
         disableConcurrentBuilds abortPrevious: true
-        timestamps()  // ✅ Correctly placed here
+        // timestamps() ❌ Removed because it's not allowed here
     }
 
     stages {
@@ -61,7 +61,7 @@ pipeline {
                 sh 'echo Password - $MONGO_DB_CREDS_PSW'
                 sh 'npm test'
             }
-        }    
+        }
 
         stage('Code Coverage') {
             steps {
@@ -70,24 +70,6 @@ pipeline {
                 }
             }
         }
-
-        // stage('SAST - SonarQube') {
-        //     steps {
-        //         sh 'sleep 5s'
-        //         // timeout(time: 60, unit: 'SECONDS') {
-        //         //     withSonarQubeEnv('sonar-qube-server') {
-        //         //         sh 'echo $SONAR_SCANNER_HOME'
-        //         //         sh '''
-        //         //             $SONAR_SCANNER_HOME/bin/sonar-scanner \
-        //         //                 -Dsonar.projectKey=Solar-System-Project \
-        //         //                 -Dsonar.sources=app.js \
-        //         //                 -Dsonar.javascript.lcov.reportPaths=./coverage/lcov.info
-        //         //         '''
-        //         //     }
-        //         //     waitForQualityGate abortPipeline: true
-        //         // }
-        //     }
-        // } 
 
         stage('Build Docker Image') {
             steps {
@@ -146,6 +128,11 @@ pipeline {
 
     post {
         always {
+            // ✅ Timestamps wrapper added here
+            wrap([$class: 'TimestamperBuildWrapper']) {
+                echo 'Timestamps enabled for this post block'
+            }
+
             script {
                 if (fileExists('solar-system-gitops-argocd')) {
                     sh 'rm -rf solar-system-gitops-argocd'
@@ -158,13 +145,9 @@ pipeline {
             junit allowEmptyResults: true, stdioRetention: '', testResults: 'trivy-image-MEDIUM-results.xml'
 
             publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'zap_report.html', reportName: 'DAST - OWASP ZAP Report', reportTitles: '', useWrapperFileDirectly: true])
-
             publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'trivy-image-CRITICAL-results.html', reportName: 'Trivy Image Critical Vul Report', reportTitles: '', useWrapperFileDirectly: true])
-
             publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'trivy-image-MEDIUM-results.html', reportName: 'Trivy Image Medium Vul Report', reportTitles: '', useWrapperFileDirectly: true])
-
             publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'dependency-check-jenkins.html', reportName: 'Dependency Check HTML Report', reportTitles: '', useWrapperFileDirectly: true])
-
             publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: 'coverage/lcov-report', reportFiles: 'index.html', reportName: 'Code Coverage HTML Report', reportTitles: '', useWrapperFileDirectly: true])
         }
     }
