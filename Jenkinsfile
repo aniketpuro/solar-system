@@ -12,7 +12,7 @@ pipeline {
         MONGO_USERNAME = credentials('mongo-db-username')
         MONGO_PASSWORD = credentials('mongo-db-password')
         SONAR_SCANNER_HOME = tool 'sonarqube-scanner'
-        PATH = "${env.SONAR_SCANNER_HOME}/bin:${env.PATH}"
+        PATH = "${SONAR_SCANNER_HOME}/bin:${env.PATH}"
     }
 
     stages {
