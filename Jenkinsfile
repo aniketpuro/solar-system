@@ -10,144 +10,108 @@ pipeline {
         MONGO_DB_CREDS = credentials('mongo-db-credentials')
         MONGO_USERNAME = credentials('mongo-db-username')
         MONGO_PASSWORD = credentials('mongo-db-password')
-        SONAR_SCANNER_HOME = tool 'sonarqube-scanner-610'
-        GITEA_TOKEN = credentials('gitea-api-token')
+        SONAR_SCANNER_HOME = tool 'sonarqube-scanner'
     }
 
     options {
-        timestamps() // ✅ Replaces Timestamper wrapper
-        disableResume()
-        disableConcurrentBuilds(abortPrevious: true)
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
     stages {
-        stage('Installing Dependencies') {
+
+        stage('Checkout Code') {
             steps {
-                sh 'npm install --no-audit'
+                checkout scm
             }
         }
 
-        stage('Dependency Scanning') {
-            parallel {
-                stage('NPM Dependency Audit') {
-                    steps {
+        stage('Install Dependencies') {
+            steps {
+                dir('backend') {
+                    sh 'npm install'
+                }
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                dir('backend') {
+                    sh 'npm run lint'
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonarqube-server') {
+                    dir('backend') {
                         sh '''
-                            npm audit --audit-level=critical || true
+                        ${SONAR_SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectKey=solar-system \
+                        -Dsonar.sources=. \
+                        -Dsonar.host.url=$SONAR_HOST_URL \
+                        -Dsonar.login=$SONAR_AUTH_TOKEN
                         '''
                     }
                 }
-
-                stage('OWASP Dependency Check') {
-                    steps {
-                        dependencyCheck additionalArguments: '''
-                            --scan ./ 
-                            --out ./  
-                            --format ALL 
-                            --disableYarnAudit 
-                            --prettyPrint
-                        ''', odcInstallation: 'OWASP-DepCheck-10'
-
-                        dependencyCheckPublisher failedTotalCritical: 1, pattern: 'dependency-check-report.xml', stopBuild: false
-                    }
-                }
             }
         }
 
-        stage('Unit Testing') {
-            options { retry(2) }
+        stage('Unit Tests') {
             steps {
-                sh 'echo Colon-Separated - $MONGO_DB_CREDS'
-                sh 'echo Username - $MONGO_DB_CREDS_USR'
-                sh 'echo Password - $MONGO_DB_CREDS_PSW'
-                sh 'npm test'
-            }
-        }
-
-        stage('Code Coverage') {
-            steps {
-                catchError(buildResult: 'SUCCESS', message: 'Oops! it will be fixed in future releases', stageResult: 'UNSTABLE') {
-                    sh 'npm run coverage'
+                dir('backend') {
+                    sh 'npm test'
                 }
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh 'printenv'
-                sh 'docker build -t siddharth67/solar-system:$GIT_COMMIT .'
+                script {
+                    dockerImage = docker.build("aniketpurohit/solar-system:latest", "./backend")
+                }
             }
         }
 
-        stage('Trivy Vulnerability Scanner') {
+        stage('Push Docker Image') {
             steps {
-                sh ''' 
-                    trivy image siddharth67/solar-system:$GIT_COMMIT \
-                        --severity LOW,MEDIUM,HIGH \
-                        --exit-code 0 \
-                        --quiet \
-                        --format json -o trivy-image-MEDIUM-results.json
-
-                    trivy image siddharth67/solar-system:$GIT_COMMIT \
-                        --severity CRITICAL \
-                        --exit-code 1 \
-                        --quiet \
-                        --format json -o trivy-image-CRITICAL-results.json
-                '''
+                withDockerRegistry([credentialsId: 'dockerhub', url: '']) {
+                    script {
+                        dockerImage.push()
+                    }
+                }
             }
-            post {
-                always {
+        }
+
+        stage('Deploy to K8s') {
+            steps {
+                withKubeConfig([credentialsId: 'kubeconfig']) {
                     sh '''
-                        trivy convert \
-                            --format template --template "@/usr/local/share/trivy/templates/html.tpl" \
-                            --output trivy-image-MEDIUM-results.html trivy-image-MEDIUM-results.json 
-
-                        trivy convert \
-                            --format template --template "@/usr/local/share/trivy/templates/html.tpl" \
-                            --output trivy-image-CRITICAL-results.html trivy-image-CRITICAL-results.json
-
-                        trivy convert \
-                            --format template --template "@/usr/local/share/trivy/templates/junit.tpl" \
-                            --output trivy-image-MEDIUM-results.xml  trivy-image-MEDIUM-results.json 
-
-                        trivy convert \
-                            --format template --template "@/usr/local/share/trivy/templates/junit.tpl" \
-                            --output trivy-image-CRITICAL-results.xml trivy-image-CRITICAL-results.json
+                    kubectl apply -f k8s/deployment.yaml
+                    kubectl apply -f k8s/service.yaml
                     '''
                 }
             }
-        } 
+        }
 
-        stage('Push Docker Image') {
+        stage('Post Deployment Health Check') {
             steps {
-                withDockerRegistry(credentialsId: 'docker-hub-credentials', url: "") {
-                    sh 'docker push siddharth67/solar-system:$GIT_COMMIT'
-                }
+                sh 'curl -f http://localhost:3000/health || exit 1'
             }
         }
     }
 
     post {
         always {
-            node {
-                echo 'Post-processing steps...'
-
-                script {
-                    if (fileExists('solar-system-gitops-argocd')) {
-                        sh 'rm -rf solar-system-gitops-argocd'
-                    }
-                }
-
-                junit allowEmptyResults: true, testResults: 'test-results.xml'
-                junit allowEmptyResults: true, testResults: 'dependency-check-junit.xml'
-                junit allowEmptyResults: true, testResults: 'trivy-image-CRITICAL-results.xml'
-                junit allowEmptyResults: true, testResults: 'trivy-image-MEDIUM-results.xml'
-
-                publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'zap_report.html', reportName: 'DAST - OWASP ZAP Report', useWrapperFileDirectly: true])
-                publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'trivy-image-CRITICAL-results.html', reportName: 'Trivy Image Critical Vul Report', useWrapperFileDirectly: true])
-                publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'trivy-image-MEDIUM-results.html', reportName: 'Trivy Image Medium Vul Report', useWrapperFileDirectly: true])
-                publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'dependency-check-jenkins.html', reportName: 'Dependency Check HTML Report', useWrapperFileDirectly: true])
-                publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: 'coverage/lcov-report', reportFiles: 'index.html', reportName: 'Code Coverage HTML Report', useWrapperFileDirectly: true])
-            }
+            cleanWs()
+        }
+        success {
+            echo 'Build and Deployment Successful!'
+        }
+        failure {
+            echo 'Build or Deployment Failed.'
         }
     }
 }
