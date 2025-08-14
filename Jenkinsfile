@@ -11,8 +11,6 @@ pipeline {
         MONGO_PASSWORD = credentials('mongo-db-password')
     }
     stages {
-        // We've moved the "Installing Dependencies" and "Dependency Scanning" stages
-        // into a single agent block to ensure they run in the same workspace.
         stage('Dependency Scanning and Install') {
             agent {
                 docker {
@@ -21,34 +19,35 @@ pipeline {
                 }
             }
             steps {
-                // Install dependencies first so they are available for both parallel stages
+                // First, install dependencies so they are available for both parallel stages.
                 sh 'npm install --no-audit'
-            }
-            // Now the parallel stages run inside the same Docker container, so they have access to node_modules
-            parallel {
-                stage('NPM Dependency Audit') {
-                    steps {
-                        // The 'npm audit' command should not fail the build here, so we wrap it
-                        // in a catchError block to allow the pipeline to proceed even if vulnerabilities are found.
-                        catchError(buildResult: 'SUCCESS', message: 'NPM audit found vulnerabilities', stageResult: 'UNSTABLE') {
-                            sh 'npm audit --audit-level=critical'
+
+                // Now, run the parallel stages inside the steps block.
+                parallel {
+                    stage('NPM Dependency Audit') {
+                        steps {
+                            // The 'npm audit' command is now in a catchError block to allow the pipeline
+                            // to proceed, as per the initial instructions.
+                            catchError(buildResult: 'SUCCESS', message: 'NPM audit found vulnerabilities', stageResult: 'UNSTABLE') {
+                                sh 'npm audit --audit-level=critical'
+                            }
                         }
                     }
-                }
-                stage('OWASP Dependency Check') {
-                    steps {
-                        dependencyCheck additionalArguments: '''
-                            --scan \'./\'  
-                            --out \'./\'  
-                            --format \'ALL\'
-                            --disableYarnAudit \
-                            --data /var/lib/jenkins/owasp-db/data/ \
-                            --prettyPrint''', odcInstallation: 'OWASP-DepCheck-12'
-                        
-                        // This configuration is correct and will now properly check for critical vulnerabilities
-                        // after the `npm install` step has completed.
-                        dependencyCheckPublisher failedTotalCritical: 1, pattern: 'dependency-check-report.xml', stopBuild: true
-                        publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'dependency-check-jenkins.html', reportName: 'Dependency Check HTML Report', reportTitles: '', useWrapperFileDirectly: true])
+                    stage('OWASP Dependency Check') {
+                        steps {
+                            dependencyCheck additionalArguments: '''
+                                --scan \'./\'
+                                --out \'./\'
+                                --format \'ALL\'
+                                --disableYarnAudit \
+                                --data /var/lib/jenkins/owasp-db/data/ \
+                                --prettyPrint''', odcInstallation: 'OWASP-DepCheck-12'
+
+                            // This configuration is correct and will now properly check for critical vulnerabilities
+                            // after the `npm install` step has completed.
+                            dependencyCheckPublisher failedTotalCritical: 1, pattern: 'dependency-check-report.xml', stopBuild: true
+                            publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'dependency-check-jenkins.html', reportName: 'Dependency Check HTML Report', reportTitles: '', useWrapperFileDirectly: true])
+                        }
                     }
                 }
             }
