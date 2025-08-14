@@ -1,80 +1,99 @@
 pipeline {
-    agent any
-
+    agent {
+        label 'ubuntu-docker'
+    }
     tools {
         nodejs 'nodejs-22-6-0'
-        maven 'Maven 3.9.6'
     }
-
     environment {
-        MONGO_URI = "mongodb+srv://supercluster.d83jj.mongodb.net/superData"
         MONGO_DB_CREDS = credentials('mongo-db-credentials')
         MONGO_USERNAME = credentials('mongo-db-username')
         MONGO_PASSWORD = credentials('mongo-db-password')
-        SONAR_SCANNER_HOME = tool 'sonarqube-scanner'
-        PATH = "${SONAR_SCANNER_HOME}/bin:${env.PATH}"
     }
-
     stages {
-        stage('Install Dependencies') {
+        stage('Installing Dependencies') {
+            agent {
+                docker {
+                    image 'node:24'
+                    args '-u root:root'
+                }
+            }
             steps {
-                echo 'Installing Node.js dependencies...'
-                sh 'npm install'
+                sh 'npm install --no-audit'
             }
         }
-
-        stage('Code Analysis - SonarQube') {
-            steps {
-                echo 'Running SonarQube analysis...'
-                sh '''
-                    sonar-scanner \
-                    -Dsonar.projectKey=solar-system \
-                    -Dsonar.sources=. \
-                    -Dsonar.host.url=http://localhost:9000 \
-                    -Dsonar.login=${MONGO_DB_CREDS}
-                '''
+        stage('Dependency Scanning') {
+            parallel {
+                stage('NPM Dependency Audit') {
+                    steps {
+                        sh '''
+                            npm audit --audit-level=critical
+                            echo $?
+                        '''
+                    }
+                }
+                stage('OWASP Dependency Check') {
+                    steps {
+                        dependencyCheck additionalArguments: '''
+                            --scan \'./\' 
+                            --out \'./\'  
+                            --format \'ALL\' 
+                            --disableYarnAudit \
+                            --data /var/lib/jenkins/owasp-db/data/ \
+                            --prettyPrint''', odcInstallation: 'OWASP-DepCheck-12'
+                        dependencyCheckPublisher failedTotalCritical: 1, pattern: 'dependency-check-report.xml', stopBuild: true
+                        publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'dependency-check-jenkins.html', reportName: 'Dependency Check HTML Report', reportTitles: '', useWrapperFileDirectly: true])
+                    }
+                }
             }
         }
-
-        stage('Run Tests') {
+        stage('Unit Testing') {
+            agent {
+                docker {
+                    image 'node:24'
+                    args '-u root:root'
+                }
+            }
+            options {
+                retry(2)
+            }
             steps {
-                echo 'Running test cases...'
-                sh 'npm test || echo "Tests failed, but continuing..."'
+                sh 'npm test'
+                junit allowEmptyResults: true, stdioRetention: '', testResults: 'test-results.xml'
             }
         }
-
-        stage('Build Package') {
+        stage('Code Coverage') {
+            agent {
+                docker {
+                    image 'node:24'
+                    args '-u root:root'
+                }
+            }
             steps {
-                echo 'Building the Node.js project...'
-                sh 'npm run build || echo "Build failed, but continuing..."'
+                catchError(buildResult: 'SUCCESS', message: 'Oops! it will be fixed in future releases', stageResult: 'UNSTABLE') {
+                    sh 'npm run coverage'
+                }
+                publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: 'coverage/lcov-report', reportFiles: 'index.html', reportName: 'Code Coverage HTML Report', reportTitles: '', useWrapperFileDirectly: true])
             }
         }
-
-        stage('Archive Artifacts') {
+        stage('Build Docker Image') {
             steps {
-                echo 'Archiving build artifacts...'
-                archiveArtifacts artifacts: '**/dist/**/*', fingerprint: true
+                sh  'docker build -t kodekloud-hub:5000/solar-system:$GIT_COMMIT .'
             }
         }
-
-        stage('Publish Results') {
+        stage('Trivy Vulnerability Scanner') {
             steps {
-                echo 'Publishing test results...'
-                junit 'test-results/*.xml'  // Adjust this path to your actual test output
+                sh  '''trivy image --severity CRITICAL --exit-code 1 --format json -o trivy-image-CRITICAL-results.json  kodekloud-hub:5000/solar-system:$GIT_COMMIT '''
+                sh  '''trivy convert --format template --template "@/usr/local/share/trivy/templates/html.tpl" --output trivy-image-CRITICAL-results.html trivy-image-CRITICAL-results.json'''
+                publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './', reportFiles: 'trivy-image-CRITICAL-results.html', reportName: 'Trivy Image Critical Vul Report', reportTitles: '', useWrapperFileDirectly: true])
+           }
+        }
+        stage('Push Docker Image') {
+            steps {
+                withDockerRegistry(credentialsId: 'docker-hub-credentials', url: "") {
+                    sh  'docker push kodekloud-hub:5000/solar-system:$GIT_COMMIT'
+                }
             }
-        }
-    }
-
-    post {
-        always {
-            echo 'Cleaning up workspace...'
-            cleanWs()
-        }
-        failure {
-            echo 'Pipeline failed. Please check logs and fix issues.'
-        }
-        success {
-            echo 'Pipeline completed successfully!'
         }
     }
 }
