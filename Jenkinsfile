@@ -18,10 +18,10 @@ pipeline {
                     args '-u root:root'
                 }
             }
-            steps {
+            steps { // Added missing curly brace here
                 // First, install dependencies so they are available for the next stage.
                 sh 'npm install --no-audit'
-            }
+            } // Added missing curly brace here
         }
         stage('Dependency Scanning') {
             // This stage no longer has its own agent, as it contains a parallel block.
