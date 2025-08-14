@@ -24,15 +24,16 @@ pipeline {
             }
         }
         stage('Dependency Scanning') {
-            agent {
-                docker {
-                    image 'node:24'
-                    args '-u root:root'
-                }
-            }
-            // Now, run the parallel stages in their own stage.
+            // This stage no longer has its own agent, as it contains a parallel block.
             parallel {
                 stage('NPM Dependency Audit') {
+                    // Each parallel stage now has its own agent.
+                    agent {
+                        docker {
+                            image 'node:24'
+                            args '-u root:root'
+                        }
+                    }
                     steps {
                         // The 'npm audit' command is now in a catchError block to allow the pipeline
                         // to proceed, as per the initial instructions.
@@ -42,6 +43,13 @@ pipeline {
                     }
                 }
                 stage('OWASP Dependency Check') {
+                    // Each parallel stage now has its own agent.
+                    agent {
+                        docker {
+                            image 'node:24'
+                            args '-u root:root'
+                        }
+                    }
                     steps {
                         dependencyCheck additionalArguments: '''
                             --scan \'./\'
